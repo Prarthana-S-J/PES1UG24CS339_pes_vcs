@@ -94,22 +94,78 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-	char header[64];
-	const char *type_str;
+	
+    char header[64];
+    const char *type_str;
 
-	if (type == OBJ_BLOB) type_str = "blob";
-	else if (type == OBJ_TREE) type_str = "tree";
-	else if (type == OBJ_COMMIT) type_str = "commit";
-	else return -1;
+    if (type == OBJ_BLOB) type_str = "blob";
+    else if (type == OBJ_TREE) type_str = "tree";
+    else if (type == OBJ_COMMIT) type_str = "commit";
+    else return -1;
 
-	// create header "type size\0"
-	int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
+    // Create header "type size\0"
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
 
-	// allocate full object
-	size_t total_len = header_len + len;
-	char *full_obj = malloc(total_len);
-	memcpy(full_obj, header, header_len);
-	memcpy(full_obj + header_len, data, len);
+    // Combine header + data
+    size_t total_len = header_len + len;
+    char *full_obj = malloc(total_len);
+    if (!full_obj) return -1;
+
+    memcpy(full_obj, header, header_len);
+    memcpy(full_obj + header_len, data, len);
+
+    // Compute hash
+    ObjectID id;
+    compute_hash(full_obj, total_len, &id);
+
+    // Deduplication check
+    if (object_exists(&id)) {
+        *id_out = id;
+        free(full_obj);
+        return 0;
+    }
+
+    // Get object path
+    char path[512];
+    object_path(&id, path, sizeof(path));
+
+    // Create shard directory
+    char dir[512];
+    strncpy(dir, path, sizeof(dir));
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        mkdir(dir, 0755);
+    }
+
+    // Temporary file
+    char temp_path[512];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+
+    int fd = open(temp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(full_obj);
+        return -1;
+    }
+
+    write(fd, full_obj, total_len);
+    fsync(fd);
+    close(fd);
+
+    // Atomic rename
+    rename(temp_path, path);
+
+    // Sync directory
+    int dir_fd = open(dir, O_DIRECTORY);
+    if (dir_fd >= 0) {
+        fsync(dir_fd);
+        close(dir_fd);
+    }
+
+    *id_out = id;
+    free(full_obj);
+    return 0;
+
 }
 
 // Read an object from the store.
