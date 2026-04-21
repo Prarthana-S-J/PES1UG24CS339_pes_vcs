@@ -23,6 +23,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <time.h>
+
 
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
@@ -138,7 +140,7 @@ int index_load(Index *index) {
     FILE *fp = fopen(".pes/index", "r");
     index->count = 0;
 
-    if (!fp) return 0; // no index yet → not error
+    if (!fp) return 0;
 
     while (index->count < MAX_INDEX_ENTRIES) {
         IndexEntry *e = &index->entries[index->count];
@@ -146,7 +148,7 @@ int index_load(Index *index) {
         char hash_hex[HASH_HEX_SIZE + 1];
 
         if (fscanf(fp, "%o %s %ld %zu %s\n",
-                   &e->mode, hash_hex, &e->mtime, &e->size, e->path) != 5)
+                   &e->mode, hash_hex, &e->mtime_sec, &e->size, e->path) != 5)
             break;
 
         hex_to_hash(hash_hex, &e->hash);
@@ -167,24 +169,28 @@ int index_load(Index *index) {
 //   - rename                           : atomically moving the temp file over the old index
 //
 // Returns 0 on success, -1 on error.
-int index_save(Index *index) {
-    FILE *fp = fopen(".pes/index", "w");
+int index_save(const Index *index) {
+    FILE *fp = fopen(".pes/index.tmp", "w");
     if (!fp) return -1;
 
     for (int i = 0; i < index->count; i++) {
-        IndexEntry *e = &index->entries[i];
+        const IndexEntry *e = &index->entries[i];
 
         char hash_hex[HASH_HEX_SIZE + 1];
         hash_to_hex(&e->hash, hash_hex);
 
         fprintf(fp, "%o %s %ld %zu %s\n",
-                e->mode, hash_hex, e->mtime, e->size, e->path);
+                e->mode, hash_hex, e->mtime_sec, e->size, e->path);
     }
 
+    fflush(fp);
+    fsync(fileno(fp));
     fclose(fp);
+
+    rename(".pes/index.tmp", ".pes/index");
+
     return 0;
 }
-
 // Stage a file for the next commit.
 //
 // HINTS - Useful functions and syscalls:
@@ -214,15 +220,20 @@ int index_add(Index *index, const char *path) {
 
     free(data);
 
-    IndexEntry *e = &index->entries[index->count];
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
 
-    e->mode = get_file_mode(path);
+    IndexEntry *e = index_find(index, path);
+
+    if (!e) {
+        e = &index->entries[index->count++];
+    }
+
+    e->mode = st.st_mode;
     e->size = size;
-    e->mtime = time(NULL);
+    e->mtime_sec = st.st_mtime;
     strcpy(e->path, path);
     e->hash = id;
 
-    index->count++;
-
-    return 0;
+    return index_save(index);
 }

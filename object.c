@@ -94,7 +94,6 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-	
     char header[64];
     const char *type_str;
 
@@ -103,10 +102,8 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     else if (type == OBJ_COMMIT) type_str = "commit";
     else return -1;
 
-    // Create header "type size\0"
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
 
-    // Combine header + data
     size_t total_len = header_len + len;
     char *full_obj = malloc(total_len);
     if (!full_obj) return -1;
@@ -114,31 +111,37 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     memcpy(full_obj, header, header_len);
     memcpy(full_obj + header_len, data, len);
 
-    // Compute hash
     ObjectID id;
     compute_hash(full_obj, total_len, &id);
 
-    // Deduplication check
     if (object_exists(&id)) {
         *id_out = id;
         free(full_obj);
         return 0;
     }
 
-    // Get object path
     char path[512];
     object_path(&id, path, sizeof(path));
 
-    // Create shard directory
+    // Extract directory path
     char dir[512];
     strncpy(dir, path, sizeof(dir));
     char *slash = strrchr(dir, '/');
-    if (slash) {
-        *slash = '\0';
-        mkdir(dir, 0755);
+    if (!slash) {
+        free(full_obj);
+        return -1;
+    }
+    *slash = '\0';
+
+    // Create directory safely
+    struct stat st = {0};
+    if (stat(dir, &st) == -1) {
+        if (mkdir(dir, 0755) != 0) {
+            free(full_obj);
+            return -1;
+        }
     }
 
-    // Temporary file
     char temp_path[512];
     snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
 
@@ -148,24 +151,24 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         return -1;
     }
 
-    write(fd, full_obj, total_len);
+    ssize_t written = write(fd, full_obj, total_len);
+    if (written != (ssize_t)total_len) {
+        close(fd);
+        free(full_obj);
+        return -1;
+    }
+
     fsync(fd);
     close(fd);
 
-    // Atomic rename
-    rename(temp_path, path);
-
-    // Sync directory
-    int dir_fd = open(dir, O_DIRECTORY);
-    if (dir_fd >= 0) {
-        fsync(dir_fd);
-        close(dir_fd);
+    if (rename(temp_path, path) != 0) {
+        free(full_obj);
+        return -1;
     }
 
     *id_out = id;
     free(full_obj);
     return 0;
-
 }
 
 // Read an object from the store.
@@ -191,7 +194,6 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
     char path[512];
     object_path(id, path, sizeof(path));
 
@@ -244,5 +246,4 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
 
     free(buffer);
     return 0;
-}
 }
